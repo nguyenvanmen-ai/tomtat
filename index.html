@@ -116,6 +116,20 @@ pre.raw{white-space:pre-wrap;word-break:break-word;max-height:65vh;overflow:auto
     <select id="pgPos"><option value="center" selected>Giữa</option><option value="right">Phải</option><option value="left">Trái</option></select>
     <label>Bắt đầu từ số <input type="number" id="pgStart" value="1" min="1" max="9999" style="width:80px"></label>
   </div>
+  <div class="ai" id="tts" style="margin:0 0 12px">
+    <b>🔊 Nghe nội dung tóm tắt</b>
+    <div class="row">
+      <select id="spScope"><option value="all">Đọc toàn bộ bản tóm tắt</option><option value="key">Chỉ đọc các ý cần nhấn mạnh ⭐</option></select>
+      <select id="spVoice" style="max-width:240px"></select>
+      <label>Tốc độ <input type="range" id="spRate" min="0.6" max="1.6" step="0.1" value="1" style="width:110px"> <span id="spRateV">1.0x</span></label>
+    </div>
+    <div class="btns" style="margin-top:4px">
+      <button class="btn" id="spPlay">▶ Nghe</button><button class="btn sec" id="spPause">⏸ Tạm dừng</button><button class="btn sec" id="spPrev">⏮</button><button class="btn sec" id="spNext">⏭</button><button class="btn sec" id="spStop">⏹ Dừng</button>
+      <button class="btn sec" id="spRec" title="Thử nghiệm">⏺ Ghi thành file âm thanh</button>
+    </div>
+    <div class="msg" id="spNow" style="margin-top:8px"></div>
+    <div class="warn" id="spNote"></div>
+  </div>
   <div class="tabs">
     <button class="tab on" data-t="tree">📁 Cây thư mục</button>
     <button class="tab" data-t="map">🧠 Sơ đồ tư duy</button>
@@ -135,6 +149,7 @@ pre.raw{white-space:pre-wrap;word-break:break-word;max-height:65vh;overflow:auto
     <div class="mmbox"><svg id="mm" xmlns="http://www.w3.org/2000/svg"><g id="mmg"></g></svg></div>
   </div>
   <div id="p-raw" class="hide"><pre class="raw" id="raw"></pre></div>
+  
 </section>
 </div>
 
@@ -501,6 +516,106 @@ $("toPng").onclick=()=>{
   };
   img.onerror=()=>setErr("Không xuất được ảnh sơ đồ, hãy thu gọn bớt các nhánh rồi thử lại.");
   img.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+};
+
+/* ---------- Nghe (đọc to) ---------- */
+const sp={items:[],i:0,tok:0,paused:false,onDone:null,voices:[]};
+const hasTTS="speechSynthesis" in window;
+function loadVoices(){
+  if(!hasTTS)return;
+  const v=speechSynthesis.getVoices();sp.voices=v;
+  const vi=v.filter(x=>/^vi/i.test(x.lang));const list=vi.length?vi:v;
+  $("spVoice").innerHTML=list.map(x=>'<option value="'+esc(x.name)+'">'+esc(x.name)+" ("+esc(x.lang)+")</option>").join("");
+  $("spNote").textContent=vi.length?"Mẹo: giọng tiếng Việt chất lượng cao thường có sẵn trên Chrome/Edge và điện thoại.":"Thiết bị này chưa có giọng tiếng Việt nên có thể đọc sai. Hãy thử Chrome/Edge hoặc cài giọng Vietnamese trong cài đặt hệ thống.";
+}
+if(hasTTS){speechSynthesis.onvoiceschanged=loadVoices;loadVoices();}
+else{$("tts").innerHTML="<b>🔊 Nghe nội dung tóm tắt</b><div class='warn'>Trình duyệt này không hỗ trợ đọc văn bản thành giọng nói. Hãy dùng Chrome, Edge hoặc Safari.</div>";}
+$("spRate").oninput=()=>{$("spRateV").textContent=(+$("spRate").value).toFixed(1)+"x";};
+function speakClean(t){
+  return t.replace(/%/g," phần trăm").replace(/\s*[-–]\s*/g," ").replace(/[“”"]/g,"").replace(/\(([^)]*)\)/g,", $1,").replace(/\s+/g," ").trim();
+}
+function stripNum(t){return t.replace(/^(\d{1,2}(\.\d{1,2})*\.?|[IVX]+\.|[A-ZĐ]\.)\s+/,"");}
+function buildSpeech(scope){
+  const out=[];
+  if(scope==="key"){
+    let last="";
+    keyList(S.tree,[],[]).forEach(k=>{if(k.p&&k.p!==last){out.push("Mục. "+stripNum(k.p));last=k.p;}out.push(k.t);});
+    return out;
+  }
+  out.push("Tóm tắt "+S.name);
+  (function w(n,d){
+    for(const c of n.c||[]){
+      if(c.c&&c.c.length){out.push((d===0?"Phần. ":"")+stripNum(c.t));w(c,d+1);}else out.push(c.t);
+    }
+  })(S.tree,0);
+  return out;
+}
+function chunkSpeech(items){
+  const r=[];
+  items.forEach(t=>{
+    t=speakClean(t);
+    if(t.length<=220){if(t)r.push(t);return;}
+    let cur="";
+    t.split(/(?<=[.!?;,])\s+/).forEach(p=>{if((cur+" "+p).length>220&&cur){r.push(cur);cur=p;}else cur=(cur?cur+" ":"")+p;});
+    if(cur)r.push(cur);
+  });
+  return r;
+}
+function speakAt(i,tok){
+  if(tok!==sp.tok)return;
+  if(i>=sp.items.length){$("spNow").textContent="Đã đọc xong.";const f=sp.onDone;sp.onDone=null;if(f)f();return;}
+  sp.i=i;
+  const u=new SpeechSynthesisUtterance(sp.items[i]);
+  const v=sp.voices.find(x=>x.name===$("spVoice").value);
+  if(v){u.voice=v;u.lang=v.lang;}else u.lang="vi-VN";
+  u.rate=+$("spRate").value;
+  u.onend=()=>speakAt(i+1,tok);
+  u.onerror=e=>{if(e.error==="interrupted"||e.error==="canceled")return;speakAt(i+1,tok);};
+  $("spNow").textContent="Đang đọc ("+(i+1)+"/"+sp.items.length+"): "+sp.items[i];
+  speechSynthesis.speak(u);
+}
+function spStart(){
+  speechSynthesis.cancel();sp.tok++;sp.paused=false;
+  sp.items=chunkSpeech(buildSpeech($("spScope").value));
+  if(!sp.items.length){$("spNow").textContent="Không có nội dung để đọc.";return;}
+  speakAt(0,sp.tok);
+}
+$("spPlay").onclick=()=>{if(!hasTTS||!S.tree)return;if(sp.paused){speechSynthesis.resume();sp.paused=false;return;}spStart();};
+$("spPause").onclick=()=>{if(!hasTTS)return;if(sp.paused){speechSynthesis.resume();sp.paused=false;$("spPause").textContent="⏸ Tạm dừng";}else{speechSynthesis.pause();sp.paused=true;$("spPause").textContent="▶ Tiếp tục";}};
+$("spStop").onclick=()=>{if(!hasTTS)return;sp.tok++;sp.paused=false;sp.onDone=null;speechSynthesis.cancel();$("spPause").textContent="⏸ Tạm dừng";$("spNow").textContent="Đã dừng.";if(recState)recState.finish();};
+function spJump(d){if(!hasTTS||!sp.items.length)return;sp.tok++;speechSynthesis.cancel();sp.paused=false;speakAt(Math.max(0,sp.i+d),sp.tok);}
+$("spPrev").onclick=()=>spJump(-1);$("spNext").onclick=()=>spJump(1);
+window.addEventListener("beforeunload",()=>{if(hasTTS)speechSynthesis.cancel();});
+
+/* Ghi thành file âm thanh (thử nghiệm: thu âm thanh của chính tab này) */
+let recState=null;
+$("spRec").onclick=async()=>{
+  if(!hasTTS||!S.tree)return;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia||!window.MediaRecorder){setErr("Trình duyệt này không hỗ trợ ghi âm thanh của tab. Hãy dùng Chrome hoặc Edge trên máy tính.");return;}
+  setErr("");
+  try{
+    const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,preferCurrentTab:true});
+    const at=stream.getAudioTracks();
+    if(!at.length){stream.getTracks().forEach(t=>t.stop());throw new Error("Chưa thu được âm thanh. Khi hộp thoại hiện ra, hãy chọn tab này và bật “Chia sẻ âm thanh của tab”.");}
+    const rec=new MediaRecorder(new MediaStream(at));const chunks=[];
+    rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+    rec.onstop=()=>{
+      stream.getTracks().forEach(t=>t.stop());recState=null;
+      if(!chunks.length){setErr("Không ghi được âm thanh nào.");return;}
+      const b=new Blob(chunks,{type:rec.mimeType||"audio/webm"});
+      const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=S.name+"-tom-tat.webm";a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+    };
+    let done=false;
+    recState={finish:()=>{if(done)return;done=true;setTimeout(()=>{if(rec.state!=="inactive")rec.stop();},800);}};
+    stream.getVideoTracks().forEach(t=>t.onended=()=>recState&&recState.finish());
+    rec.start();
+    speechSynthesis.cancel();sp.tok++;sp.paused=false;
+    sp.items=chunkSpeech(buildSpeech($("spScope").value));
+    sp.onDone=()=>recState&&recState.finish();
+    $("spNow").textContent="Đang ghi âm… file sẽ tự tải về khi đọc xong (không tắt tab, không tắt tiếng máy).";
+    speakAt(0,sp.tok);
+  }catch(e){setErr(e.message||"Đã hủy ghi âm.");}
 };
 
 /* ---------- Xuất Word ---------- */
